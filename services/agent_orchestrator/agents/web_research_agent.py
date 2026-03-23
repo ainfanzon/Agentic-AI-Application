@@ -3,7 +3,7 @@ from langchain_tavily import TavilySearch
 from services.agent_orchestrator.state import AnalystState
 
 def web_research_agent(state: AnalystState):
-    print("🌐 Web Research Agent: Searching for industry benchmarks...")
+    print("Web Research Agent: Searching for industry benchmarks...")
     
     # Use the 2026-standard Tavily tool to stop the deprecation warnings
     search = TavilySearch(max_results=3)
@@ -21,7 +21,7 @@ def web_research_agent(state: AnalystState):
             "next_step": "analysis_agent"
         }
     except Exception as e:
-        print(f"⚠️ Web Research Failed: {e}")
+        print(f"AICA: Web Research Failed: {e}")
         # Return an empty list to satisfy the 'add' reducer without crashing the state
         return {
             "data_context": [], 

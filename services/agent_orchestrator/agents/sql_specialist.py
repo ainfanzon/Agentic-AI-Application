@@ -8,7 +8,7 @@ async def sql_specialist(state: AnalystState):
     """
     Writes and executes CockroachDB-compatible SQL using the native MCP toolset.
     """
-    print("🐝 SQL Specialist: Crafting and Executing Query via MCP...")
+    print("SQL Specialist: Crafting and Executing Query via MCP...")
 
     llm = ChatOllama(model="llama3", temperature=0)
 
@@ -53,7 +53,7 @@ async def sql_specialist(state: AnalystState):
     clean_query = re.sub(r"INTERVAL (\d+) MONTH", r"INTERVAL '\1 months'", clean_query, flags=re.IGNORECASE)
 
     try:
-        print(f"📡 MCP Executing: {clean_query}")
+        print(f"MCP Executing: {clean_query}")
         result = await call_cockroach_mcp("execute_query", {"query": clean_query})
         
         # Log the full result for verification
@@ -68,7 +68,7 @@ async def sql_specialist(state: AnalystState):
             "next_step": "web_research"
         }
     except Exception as e:
-        print(f"❌ SQL Execution Error: {e}")
+        print(f"AICA: SQL Execution Error: {e}")
         return {
             "critique": f"SQL Syntax Error: {str(e)}", 
             "next_step": "planner"

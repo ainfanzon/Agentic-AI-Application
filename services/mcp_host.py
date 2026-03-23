@@ -1,3 +1,12 @@
+"""
+MCP Host
+--------
+This file initializes a Session with an external server (hosted on GitHub by amineelkouhen).
+
+The Server: It’s a specialized piece of software that knows how to talk to CockroachDB.
+
+The Client (mcp_host.py): It call tools like execute_query or describe_table.
+"""
 import os
 import asyncio
 from dotenv import load_dotenv
@@ -26,7 +35,7 @@ async def call_cockroach_mcp(tool_name: str, arguments: dict):
     - describe_table: {"table_name": "revenue"}
     - list_tables: {"db_schema": "public"}
     """
-    print(f"🐝 Native Cockroach MCP: Executing '{tool_name}'...")
+    print(f"Native Cockroach MCP: Executing '{tool_name}'...")
     
     try:
         async with stdio_client(server_params) as (read, write):
@@ -39,4 +48,4 @@ async def call_cockroach_mcp(tool_name: str, arguments: dict):
                 return str(response)
                     
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"AICA: {str(e)}"

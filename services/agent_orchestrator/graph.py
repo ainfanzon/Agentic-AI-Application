@@ -10,6 +10,17 @@ from services.agent_orchestrator.agents.analysis_agent import analysis_agent
 from services.agent_orchestrator.agents.critic import critic_agent
 from services.agent_orchestrator.agents.memory_agent import memory_agent 
 
+import networkx as nx
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def visualize_compiled_graph(compiled_app):
+    sns.set_theme(style="white")
+    plt.figure(figsize=(12, 8))
+    # ... [Your NetworkX drawing code here] ...
+    plt.savefig("dynamic_swarm_graph.png")
+    plt.show()
+
 def create_swarm_graph():
     workflow = StateGraph(AnalystState)
 

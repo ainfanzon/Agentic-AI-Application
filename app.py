@@ -1,61 +1,132 @@
+"""
+Agentic Analyst Main Application
+--------------------------------
+This module serves as the primary entry point for the Agentic Analyst Streamlit UI.
+It orchestrates a multi-agent swarm to analyze revenue data from CockroachDB 
+and synthesize it with external market trends via Tavily.
+
+Key Features:
+- Asynchronous Swarm Execution (SQL, Research, Analysis, Critic).
+- Persistent Session State for chat history and artifacts.
+- Automated Executive PDF report generation.
+- Resilient UI architecture for database connectivity issues.
+"""
 import os
 import certifi
 import asyncio
 import streamlit as st
-import time
-import json
 import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
 from fpdf import FPDF
 from services.agent_orchestrator.graph import app as swarm_app
-from services.mcp_host import call_cockroach_mcp  # Added for memory retrieval
+from services.mcp_host import call_cockroach_mcp
 
-# SSL Fix for Anaconda/Requests
+# --- 1. CONFIGURATION & SSL FIX ---
+# Must be at the very top to prevent Streamlit rendering errors
+st.set_page_config(page_title="Agentic Analyst", page_icon="🐝", layout="wide")
+
 os.environ['SSL_CERT_FILE'] = certifi.where()
 os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
-
-# Ensure artifacts directory exists
 os.makedirs("artifacts", exist_ok=True)
-
 load_dotenv()
 
-st.set_page_config(page_title="Autonomous Analyst Swarm", page_icon="🐝", layout="wide")
-
-# --- Helper Functions ---
-async def get_recent_memories():
-    """Fetches the latest 5 memories directly from CockroachDB for the UI."""
+# --- 2. HELPER FUNCTIONS (Update this section) ---
+async def check_for_existing_memory(prompt, user_id="default", threshold=0.70):
     try:
-        query = "SELECT memory_value, created_at FROM swarm_memory ORDER BY created_at DESC LIMIT 5"
-        memories = await call_cockroach_mcp("execute_query", {"query": query})
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+        query_embedding = model.encode(prompt).tolist()
+        qry_embedding_str = f"[{','.join(map(str, query_embedding))}]"
+
+        search_query = f"""
+            SELECT memory_value
+                 , full_report_text
+                 , 1 - (embedding <=> '{qry_embedding_str}'::vector) AS similarity
+                 , ROUND((1 - (embedding <=> '{qry_embedding_str}'::vector)) * 100, 2) AS confidence
+            FROM public.swarm_memory
+            WHERE user_id = '{user_id}'
+            ORDER BY embedding <=> '{qry_embedding_str}'::vector ASC
+            LIMIT 1;
+        """
         
-        parsed_memories = []
-        if isinstance(memories, dict):
-            # Try to get rows from the dict keys or formatted_result string
-            rows = memories.get("rows") or memories.get("result")
-            if not rows and memories.get("formatted_result"):
-                try:
-                    rows = json.loads(memories["formatted_result"])
-                except:
-                    pass
+        result = await call_cockroach_mcp("execute_query", {"query": search_query})
+        
+        # --- FIX STARTS HERE ---
+        import json
+        data = json.loads(result) if isinstance(result, str) else result
+        
+        # MCP responses usually wrap rows in a 'rows' key or 'formatted_result'
+        rows = []
+        if isinstance(data, dict):
+            if "rows" in data:
+                rows = data["rows"]
+            elif "formatted_result" in data:
+                rows = json.loads(data["formatted_result"])
+        elif isinstance(data, list):
+            rows = data
+
+        if rows and len(rows) > 0:
+            top_match = rows[0]
+            # Ensure we are pulling from the row dictionary
+            similarity = float(top_match.get('similarity', 0))
+            confidence = float(top_match.get('confidence', 0))
             
-            if isinstance(rows, list):
-                parsed_memories = rows
-        return parsed_memories
+            print(f"[DEBUG] Best Match Confidence: {confidence}%")
+            
+            if similarity >= threshold:
+                return {
+                    "summary": top_match.get('memory_value'),
+                    "full": top_match.get('full_report_text')
+                }
+            else:
+                print(f"[DEBUG] Match found ({confidence}%) but below threshold ({threshold*100}%)")
+        # --- FIX ENDS HERE ---
+                
     except Exception as e:
-        return [{"memory_value": f"Error loading memory: {e}", "created_at": ""}]
+        print(f"AICA Memory Search Error: {e}")
+        
+    return None
+
+async def fetch_memory_insights():
+    """Fetches the last 5 insights stored in the database."""
+    try:
+        # 1. Execute the tool call
+        result = await call_cockroach_mcp("execute_query", {
+            "query": "SELECT memory_value, created_at FROM swarm_memory ORDER BY created_at DESC LIMIT 5;"
+        })
+        
+        print(result)
+        # 2. Extract content from the MCP response object
+        # Fixed: Changed 'response' to 'result' to match your variable name
+        if hasattr(result, 'content') and len(result.content) > 0:
+            return result.content[0].text
+            
+        # 3. Fallback: If it's not an MCP object, return the raw result
+        return result
+        
+    except Exception as e:
+        st.error(f"AICA: Failed to fetch insights: {e}")
+        return []
 
 def generate_pdf(report_text, chart_path=None):
+    """
+    Generates a professional PDF executive report.
+
+    Args:
+        report_text (str): The narrative analysis generated by the AI swarm.
+        chart_path (str, optional): File path to the revenue trend PNG. Defaults to None.
+
+    Returns:
+        bytes: The generated PDF binary data for st.download_button.
+    """
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, "Autonomous Analyst Swarm - Executive Report", 
-             new_x="LMARGIN", new_y="NEXT", align="C")
-    pdf.set_font("Helvetica", "I", 10)
-    pdf.cell(0, 10, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 
-             new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.cell(0, 10, "Agentic Analyst - Executive Report", new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(10)
     pdf.set_font("Helvetica", size=12)
+    # Ensure text is compatible with latin-1 for FPDF
     clean_text = report_text.encode('latin-1', 'ignore').decode('latin-1')
     pdf.multi_cell(0, 8, clean_text)
     if chart_path and os.path.exists(chart_path):
@@ -63,122 +134,247 @@ def generate_pdf(report_text, chart_path=None):
         pdf.image(chart_path, x=15, w=180)
     return pdf.output()
 
-# --- Sidebar Controls ---
+# Define the confirmation dialog function
+@st.dialog("Wipe All Memory")
+def confirm_wipe():
+    st.warning("Are you sure you want to clear the brain? This action is permanent and will delete all stored insights in CockroachDB.")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("YES, Wipe It", type="primary", use_container_width=True):
+            success = False
+            # Run the async function using the asyncio loop
+            try:
+                asyncio.run(call_cockroach_mcp("execute_query", {"query": "DELETE FROM swarm_memory;"}))
+                print("CA: Database query finished.")
+                st.session_state.messages = [] # Clear UI history too
+                st.success("Memory wiped successfully!")
+                success = True
+            except Exception as e:
+                st.error(f"Error communicating with MCP: {e}")
+                print(f"AICA Error: {e}")
+            if success:
+                st.rerun()
+    with col2:
+        if st.button("NO, Cancel", use_container_width=True):
+            st.rerun() # Just closes the dialog
+
+# --- 3. SIDEBAR (Renders immediately) ---
 with st.sidebar:
-    st.header("🧠 Long-Term Memory")
+    st.header("Long-Term Memory")
     st.caption("Historical insights from CockroachDB")
     
-    # Memory Monitor Section
-    if st.button("🔄 Refresh Memory"):
-        # run the async fetch in the streamlit context
-        recent_mems = asyncio.run(get_recent_memories())
-        if recent_mems:
-            for i, m in enumerate(recent_mems):
-                with st.expander(f"Insight {i+1}"):
-                    st.write(m.get("memory_value", "No content"))
-                    st.caption(f"Stored: {m.get('created_at', 'unknown')}")
+    # Placeholder for database memory interactions
+    if st.button("Refresh Memory"):
+        # 1. Fetch data inside the status container
+        with st.status("Querying CockroachDB...", expanded=True) as status:
+            raw_response = asyncio.run(fetch_memory_insights())
+            
+            # --- Parsing Logic ---
+            processed_insights = []
+            try:
+                import json
+                # Handle potential string/dict variety
+                data = json.loads(raw_response) if isinstance(raw_response, str) else raw_response
+                
+                if isinstance(data, dict):
+                    if "formatted_result" in data:
+                        processed_insights = json.loads(data["formatted_result"])
+                    elif "rows" in data:
+                        processed_insights = data["rows"]
+                elif isinstance(data, list):
+                    processed_insights = data
+            except Exception as e:
+                processed_insights = []
+        
+            status.update(label="Memory Refreshed!", state="complete", expanded=False)
+        
+        # 2. RENDER OUTSIDE THE STATUS BLOCK
+        # This ensures the data stays on the sidebar after the "status" disappears
+        if not processed_insights:
+            st.warning("Database returned no rows.")
         else:
-            st.info("No memories found yet.")
-    
-    if st.button("🗑️ Wipe All Memory", type="secondary"):
-        asyncio.run(call_cockroach_mcp("execute_query", {"query": "DELETE FROM swarm_memory"}))
-        st.success("Brain wiped!")
-        st.rerun()
+            for row in processed_insights:
+                text = row.get('memory_value', 'No content found')
+                date = row.get('created_at', 'Recent')
+            
+                st.markdown(f"{text}")
+                st.caption(f"{date}")
+                st.divider()
+            
+        status.update(label="Memory Refreshed!", state="complete", expanded=False)
+
+    if st.button("Wipe All Memory", type="secondary"):
+        confirm_wipe()
 
     st.divider()
     st.header("Controls")
     if st.button("Clear Chat History"):
         st.session_state.messages = []
-        st.session_state.current_data_table = None
         st.rerun()
-    
-    st.divider()
-    st.markdown("### Industry Sources")
-    st.markdown("- [G Squared Partners](https://www.gsquaredpartners.com)\n- [Vena Solutions](https://www.venasolutions.com)\n- [Benchmarkit](https://www.benchmarkit.ai)")
 
-# --- Main UI ---
-st.title("Autonomous Analyst Swarm")
+    st.divider()
+    st.header("Industry Sources")
+    st.markdown("""
+    * **[ChartMogul SaaS Benchmarks](https://chartmogul.com/reports/saas-benchmarks/)** - Real-time data on MMR, Churn, and Growth.
+    * **[SaaStr](https://www.saastr.com)** - Extensive archives on SaaS scaling and metrics.
+    * **[Benchmarkit](https://www.benchmarkit.ai)** - Focused on B2B SaaS performance and efficiency.
+    * **[Vena Solutions](https://www.venasolutions.com)** - FP&A and revenue planning resources.
+    * **[Cloud Ratings](https://cloudratings.com)** - Software industry research and data-driven insights.
+    """)
+
+# --- 4. MAIN UI & SESSION STATE ---
+st.title("Agentic Analyst")
 st.markdown("Querying **CockroachDB** + Searching **Tavily** + Generating Insights")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "current_data_table" not in st.session_state:
-    st.session_state.current_data_table = None
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
+# --- 5. PERSISTENT CHAT HISTORY & DOWNLOAD BUTTON FIX ---
+for i, message in enumerate(st.session_state.messages):
+    # Determine avatar and role
+    avatar = "🤖" if message["role"] == "assistant" else "👤"
+    if message.get("is_memory"):
+        avatar = "🧠"  # Use an emoji for the Memory Agent
+    elif message.get("role") == "assistant":
+        avatar = "⚙️"  # Use a gear for the Orchestrator/Assistant
+
+    with st.chat_message(message["role"], avatar=avatar):
+        # 1. Display the main content (Summary or Analysis)
         st.markdown(message["content"])
+        
+        # 2. Add the Expandable Full Report if it exists
+        if "full_report" in message and message["full_report"]:
+            with st.expander("View Full Analytical Report"):
+                st.markdown("---")
+                st.markdown(message["full_report"])
+                st.caption("Source: Swarm Memory System (LTM)")
+        
+        # 3. Artifacts and Downloads (Only for the LAST assistant message)
+        if message["role"] == "assistant" and i == len(st.session_state.messages) - 1:
+            chart_path = os.path.join("artifacts", "revenue_trend.png")
+            if os.path.exists(chart_path):
+                st.image(chart_path, caption="Revenue Trend vs Benchmarks", use_container_width=True)
 
+            col1, col2 = st.columns(2)
+            with col1:
+                # Use full_report for PDF if summary is too short
+                pdf_text = message.get("full_report") or message["content"]
+                if st.button("Prepare PDF Report", key=f"pdf_btn_{i}", use_container_width=True):
+                    pdf_output = generate_pdf(pdf_text, chart_path if os.path.exists(chart_path) else None)
+                    st.download_button(
+                        label="Download PDF", 
+                        data=bytes(pdf_output), 
+                        file_name="report.pdf", 
+                        mime="application/pdf",
+                        key=f"dl_pdf_{i}",
+                        use_container_width=True
+                    )
+            with col2:
+                st.download_button(
+                    label="Download Text", 
+                    data=pdf_text, 
+                    file_name="report.txt", 
+                    key=f"txt_btn_{i}", 
+                    use_container_width=True
+                    )
+
+# --- 6. CHAT INPUT ---
 if prompt := st.chat_input("Ask about revenue trends..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    
+    # We don't append the assistant message to history yet! 
+    # We render it "live" so the button stays active.
+    with st.chat_message("assistant"):
+        with st.status("Searching long-term memory...", expanded=False) as status:
+            match = asyncio.run(check_for_existing_memory(prompt))
+            
+            if match:
+                status.update(label="Concept found in memory!", state="complete")
+                st.info("**Agent Memory Match:** I've answered this before.")
+                
+                # 1. Show the content
+                st.markdown(match["summary"])
+                with st.expander("View Full Detailed Report"):
+                    st.markdown(match["full"])
+                
+                # 2. Render the Buttons
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    if st.button("Use This Memory", key="accept_mem", use_container_width=True):
+                        st.session_state.messages.append({
+                            "role": "assistant", 
+                            "content": match["summary"], 
+                            "full_report": match["full"], 
+                            "is_memory": True
+                        })
+                        st.rerun()
+                
+                with col2:
+                    if st.button("Re-analyze with Swarm", key="regen_btn", type="primary", use_container_width=True):
+                        st.session_state.force_swarm = True
+                        # By rerunning here, Section 7 will pick up the 'force_swarm' flag
+                        st.rerun()
+                
+                # Stop execution here so the user can actually click one of the buttons
+                st.stop() 
+            else:
+                status.update(label="No existing match. Waking up swarm...", state="complete")
+    
+    st.rerun()
+
+# --- 7. SWARM EXECUTION LOGIC ---
+if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
+    last_prompt = st.session_state.messages[-1]["content"]
+    print(f"\n[DEBUG] --- STARTING SWARM EXECUTION ---")
+
+    # 1. Grab the force flag and reset it immediately
+    is_forced = st.session_state.get("force_swarm", False)
+    st.session_state.force_swarm = False # Reset so next prompt is normal
 
     with st.chat_message("assistant"):
+        # 2. ONLY check memory if we AREN'T forcing a swarm run
+        if not is_forced:
+            with st.status("Searching long-term memory...", expanded=False) as mem_status:
+                match = asyncio.run(check_for_existing_memory(last_prompt))
+                if match:
+                    mem_status.update(label="Concept found in memory!", state="complete")
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": match["summary"], 
+                        "full_report": match["full"], 
+                        "is_memory": True
+                    })
+                    st.rerun()
+        else:
+            # If forced, we show a little indicator that we are bypassing memory
+            st.caption("*Bypassing memory: Fresh analysis requested.*")
+            
+        # LOGIC (Executes if no memory match found) ---
         report_placeholder = st.empty()
-        with st.status("Swarm is waking up...", expanded=True) as status:
-            initial_state = {
-                "question": prompt, "plan": [], "strategy": "HYBRID_PATH",
-                "data_context": [], "schema_info": {}, "iteration": 0,
-                "artifacts": [], "analysis_results": "", "memory_context": ""
-            }
+        with st.status("Analyst is waking up...", expanded=True) as status:
+            initial_state = {"question": last_prompt, "analysis_results": ""}
 
             async def run_swarm():
                 final_content = "No report generated."
-                async for output in swarm_app.astream(initial_state):
-                    for node_name, state_update in output.items():
-                        status.write(f"Node **{node_name}** completed.")
-                        if "analysis_results" in state_update and state_update["analysis_results"]:
-                            final_content = state_update["analysis_results"]
-                        if "last_df_data" in state_update:
-                            st.session_state.current_data_table = state_update["last_df_data"]
-                return final_content
+                try:
+                    async for output in swarm_app.astream(initial_state):
+                        for node_name, state_update in output.items():
+                            status.write(f"Node **{node_name}** completed.")
+                            # We check for full_report_text as that's our new professional standard
+                            if "full_report_text" in state_update:
+                                final_content = state_update["full_report_text"]
+                            elif "analysis_results" in state_update:
+                                final_content = state_update["analysis_results"]
+                    return final_content
+                except Exception as e:
+                    print(f"[DEBUG] SWARM ERROR: {str(e)}")
+                    return f"AICA: Execution Error: {str(e)}"
 
             result_text = asyncio.run(run_swarm())
-            status.update(label="Swarm Analysis Complete!", state="complete", expanded=False)
+            status.update(label="Analysis Complete!", state="complete", expanded=False)
 
-        report_placeholder.markdown(result_text)
+        # --- UI UPDATE ---
+        # No more manual SQL here! The memory_agent handled it inside the swarm.
         st.session_state.messages.append({"role": "assistant", "content": result_text})
-
-        # --- DATA TABLE WITH FORECAST ---
-        if st.session_state.current_data_table:
-            with st.expander("📊 View Analyzed Data & 3-Month Forecast", expanded=False):
-                display_df = pd.DataFrame(st.session_state.current_data_table)
-                if 'month' in display_df.columns:
-                    display_df['month'] = pd.to_datetime(display_df['month']).dt.strftime('%Y-%m-%d')
-                
-                st.dataframe(
-                    display_df, 
-                    use_container_width=True, 
-                    hide_index=True,
-                    column_config={
-                        "amount": st.column_config.NumberColumn("Actual Revenue", format="$%d"),
-                        "prediction": st.column_config.NumberColumn("Trend Prediction", format="$%d"),
-                        "month": "Date"
-                    }
-                )
-                
-                csv = display_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="📥 Download Data & Forecast CSV",
-                    data=csv,
-                    file_name=f"forecast_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv"
-                )
-
-        # Chart Display
-        chart_path = "artifacts/revenue_trend.png"
-        if os.path.exists(chart_path):
-            with open(chart_path, "rb") as f:
-                st.image(f.read(), caption="Revenue Trend vs Benchmarks")
-        else:
-            st.info("No chart generated.")
-
-        # --- Download Section ---
-        st.divider()
-        col1, col2 = st.columns(2)
-        with col1:
-            pdf_bytes = generate_pdf(result_text, chart_path if os.path.exists(chart_path) else None)
-            st.download_button("Download PDF", data=bytes(pdf_bytes), file_name="Report.pdf", use_container_width=True)
-        with col2:
-            st.download_button("Download Text", data=result_text, file_name="Report.txt", use_container_width=True)
+        st.rerun()

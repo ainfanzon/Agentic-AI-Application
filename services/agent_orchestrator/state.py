@@ -4,16 +4,15 @@ from operator import add
 class AnalystState(TypedDict):
     """
     The 'Shared Whiteboard' for the Autonomous Analyst swarm.
-    Using Annotated[list, add] ensures data from different agents 
-    is appended, not overwritten.
     """
     # 1. Input & Context
     question: str
+    user_id: str # Added for multi-user support
     plan: List[str]
     strategy: str                       
 
     # 2. The Accumulative Memory
-    # CRITICAL: This allows the SQL result AND the Web result to coexist.
+    # This allows SQL and Web results to coexist.
     data_context: Annotated[List[Any], add]
 
     # 3. Execution Data
@@ -21,13 +20,18 @@ class AnalystState(TypedDict):
     current_sql: str
     analysis_results: str
 
+    # --- THE CRITICAL FIX ---
+    # This stores the finalized, high-quality summary for the database.
+    full_report_text: str 
+
     # 4. Control Flow
     iteration: int
     critique: str
     next_step: str
 
-    # 5. Output Artifacts (Paths to generated charts/PDFs)
+    # 5. Output Artifacts
     artifacts: Annotated[List[str], add]
 
-    # 6. Holds relevant LTM insights for the current session
-    memory_context: List[str]  
+    # 6. LTM Context
+    # Using Annotated[List, add] here is safer if you retrieve memory in stages.
+    memory_context: Annotated[List[str], add]

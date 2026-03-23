@@ -2,7 +2,7 @@ from services.mcp_host import call_cockroach_mcp
 from services.agent_orchestrator.state import AnalystState
 
 async def diagnostic_agent(state: AnalystState):
-    print("🏥 Diagnostic Agent: Running Deep Health Check via MCP...")
+    print("Diagnostic Agent: Running Deep Health Check via MCP...")
     
     try:
         # 1. Check general cluster health
@@ -27,6 +27,6 @@ async def diagnostic_agent(state: AnalystState):
         }
 
     except Exception as e:
-        print(f"⚠️ Diagnostic Agent Failed: {e}")
+        print(f"AICA: Diagnostic Agent Failed: {e}")
         # If diagnostics fail, don't stop the swarm, just move to SQL
         return {"next_step": "sql_specialist"}

@@ -22,7 +22,7 @@ def planner_agent(state: AnalystState):
     data_context = state.get("data_context", [])
     past_memory = state.get("memory_context", "No previous memory found.")
 
-    print(f"🐝 Planner: Orchestrating swarm with Memory Context (Iteration {iteration})...")
+    print(f"Planner: Orchestrating swarm with Memory Context (Iteration {iteration})...")
 
     # 2. Hardcoded Diagnostic Logic
     is_slow_request = any(word in question for word in ["slow", "lag", "unresponsive", "down", "performance"])
@@ -70,7 +70,7 @@ def planner_agent(state: AnalystState):
     
     # If memory already has the answer, short-circuit to end
     if result.is_resolved_by_memory:
-        print("🧠 Memory Match: Question resolved by past insights.")
+        print("Memory Match: Question resolved by past insights.")
         return {"next_step": "end", "iteration": iteration + 1}
 
     if needs_diagnostics:

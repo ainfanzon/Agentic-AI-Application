@@ -12,72 +12,78 @@ from services.agent_orchestrator.state import AnalystState
 # Set matplotlib to headless mode for server environments
 plt.switch_backend('Agg')
 
-def analysis_agent(state: AnalystState):
-    print("📊 Analysis Agent: Synthesizing data and generating comparative chart...")
+async def analysis_agent(state: AnalystState):
+    """
+    Synthesizes SQL data and Web Research to generate a predictive 
+    revenue chart and a strategic CFO-level report.
+    """
+    print("Analysis Agent: Synthesizing data and generating comparative chart...")
     
     data_context = state.get("data_context", [])
     print(f"DEBUG: Analysis Agent received context with {len(data_context)} items.")
     
-    # 1. HYPER-RESILIENT DATA EXTRACTION
     db_data = None
     web_results = ""
     
-    for entry in data_context:
-        if isinstance(entry, str):
-            if "WEB RESEARCH FINDINGS" in entry:
-                web_results = entry
-                continue
-            if entry.strip().startswith(('{', '[')):
-                try:
-                    parsed = json.loads(entry)
-                    if isinstance(parsed, dict) and "rows" in parsed:
-                        db_data = parsed["rows"]
-                        break
-                    elif isinstance(parsed, list) and len(parsed) > 0:
-                        db_data = parsed
-                        break
-                except Exception as e:
-                    print(f"⚠️ Failed to parse JSON string: {e}")
-        
-        elif isinstance(entry, dict):
-            if "rows" in entry:
-                db_data = entry["rows"]
-                break
-            elif "formatted_result" in entry:
-                try:
-                    db_data = json.loads(entry["formatted_result"])
-                    break
-                except:
-                    continue
-            
-        elif isinstance(entry, list) and len(entry) > 0 and isinstance(entry[0], dict):
-            db_data = entry
-            break
-
-    if not db_data or len(db_data) == 0:
-        print("❌ Analysis Agent: Data extraction failed.")
-        return {
-            "analysis_results": "Data Visualization Unavailable: The agent could not parse the database rows.",
-            "next_step": "critic"
-        }
-
-    # 2. DATA PROCESSING & REGRESSION
     try:
+        for entry in data_context:
+            if isinstance(entry, str):
+                if "WEB RESEARCH FINDINGS" in entry or "Rule of 40" in entry:
+                    web_results += "\n" + entry
+                    continue
+                if entry.strip().startswith(('{', '[')):
+                    try:
+                        parsed = json.loads(entry)
+                        if isinstance(parsed, dict) and "rows" in parsed:
+                            db_data = parsed["rows"]
+                        elif isinstance(parsed, list):
+                            db_data = parsed
+                    except:
+                        continue
+            
+            elif isinstance(entry, dict):
+                if "rows" in entry:
+                    db_data = entry["rows"]
+                elif "formatted_result" in entry:
+                    try:
+                        db_data = json.loads(entry["formatted_result"])
+                    except:
+                        continue
+                # FIX: Check for both 'amount' and 'total_amount' in single row dicts
+                elif "amount" in entry or "total_amount" in entry: 
+                    db_data = [entry]
+
+        if not db_data:
+            db_data = state.get("sql_results")
+
+        if not db_data or len(db_data) == 0:
+            raise ValueError("No numeric SQL data found in state. Check SQL Specialist output.")
+
+        # 2. DATA PROCESSING & REGRESSION (ENHANCED RESILIENCE)
         df = pd.DataFrame(db_data)
-        # Clean columns to prevent "duplicate key" issues during naming
         df.columns = [str(c).strip().lower() for c in df.columns]
         
+        # --- COLUMN ALIAS FIX ---
         if 'month_str' in df.columns:
             df = df.rename(columns={'month_str': 'month'})
+            
+        # Standardize 'total_amount' (from SUM queries) to 'amount'
+        if 'total_amount' in df.columns and 'amount' not in df.columns:
+            df = df.rename(columns={'total_amount': 'amount'})
         
+        if 'amount' not in df.columns:
+            available = ", ".join(df.columns)
+            raise KeyError(f"Required column 'amount' or 'total_amount' not found. Available: {available}")
+        # ------------------------
+
         df['month'] = pd.to_datetime(df['month'])
         df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
         
-        # Aggregation: Ensures unique dates before regression
         df = df.groupby('month', as_index=False)['amount'].sum()
         df = df.sort_values('month').reset_index(drop=True)
 
         # --- LINEAR REGRESSION LOGIC ---
+        full_display_df = df.copy()
         if len(df) > 1:
             df['month_ordinal'] = df['month'].map(datetime.toordinal)
             X = df[['month_ordinal']].values
@@ -86,7 +92,6 @@ def analysis_agent(state: AnalystState):
             model = LinearRegression().fit(X, y)
             df['prediction'] = model.predict(X)
             
-            # Forecast next 3 months
             last_date = df['month'].max()
             future_dates = [last_date + pd.DateOffset(months=i) for i in range(1, 4)]
             future_ordinals = np.array([d.toordinal() for d in future_dates]).reshape(-1, 1)
@@ -98,12 +103,7 @@ def analysis_agent(state: AnalystState):
                 'prediction': future_preds
             })
             
-            # FIX: Robust Concatenation
-            # We reset indices and drop duplicates to prevent "cannot assemble" error
             full_display_df = pd.concat([df, forecast_df], ignore_index=True, sort=False)
-            full_display_df = full_display_df.loc[:, ~full_display_df.columns.duplicated()].copy()
-        else:
-            full_display_df = df.copy()
 
         # 3. PLOTTING
         plt.figure(figsize=(10, 6))
@@ -113,55 +113,49 @@ def analysis_agent(state: AnalystState):
             plt.plot(full_display_df['month'], full_display_df['prediction'], 
                      linestyle='--', color='#ff7f0e', label='Revenue Trend/Forecast')
         
-        # Benchmark line logic
         first_val = df['amount'].iloc[0] if not df['amount'].empty else 0
-        benchmark_val = first_val * 1.15 
-        plt.axhline(y=benchmark_val, color='#d62728', linestyle='--', label='2026 SaaS Benchmark (15% Growth)')
+        plt.axhline(y=first_val * 1.15, color='#d62728', linestyle='--', label='2026 SaaS Benchmark (+15%)')
         
-        plt.title("Revenue Trend & 3-Month Forecast vs Industry Benchmark")
-        plt.xlabel("Month")
-        plt.ylabel("Revenue ($)")
+        plt.title("Revenue Intelligence: Actuals vs. Predictive Forecast")
         plt.legend()
         plt.grid(True, alpha=0.3)
         
-        # Save Artifact
-        current_file_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.abspath(os.path.join(current_file_dir, "../../.."))
-        artifacts_dir = os.path.join(project_root, "artifacts")
+        artifacts_dir = os.path.join(os.getcwd(), "artifacts")
         os.makedirs(artifacts_dir, exist_ok=True)
         chart_path = os.path.join(artifacts_dir, "revenue_trend.png")
-        
         plt.savefig(chart_path)
         plt.close()
+
+        # 4. LLM STRATEGIC SYNTHESIS
+        llm = ChatOllama(model="llama3", temperature=0.1)
+        safe_web = str(web_results).replace("{", "{{").replace("}", "}}")
         
-    except Exception as e:
-        print(f"❌ Plotting/Regression Error: {e}")
-        # Return partial success so the swarm doesn't loop; let the Critic explain the failure
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a Strategic SaaS CFO. Analyze internal data vs benchmarks."),
+            ("human", "Data: {db}\nResearch: {web}\nQuestion: {query}")
+        ])
+        
+        # Capture report results safely
+        try:
+            report_response = (prompt | llm).invoke({
+                "db": df.to_dict(orient='records'),
+                "web": safe_web,
+                "query": state.get("question", "")
+            })
+            report = report_response.content
+        except Exception as llm_err:
+            report = f"Data was analyzed and chart generated, but the narrative report failed: {llm_err}"
+
         return {
-            "analysis_results": f"Analysis Error: {str(e)}. However, raw data was captured.",
+            "analysis_results": report,
+            "chart_artifact": chart_path,
+            "last_df_data": full_display_df.to_dict(orient='records'), # Send back to Streamlit
             "next_step": "critic"
         }
 
-    # 4. LLM STRATEGIC SYNTHESIS
-    llm = ChatOllama(model="llama3", temperature=0.2)
-    system_prompt = "You are a Strategic SaaS CFO. Analyze internal data vs benchmarks. Provide 3 recommendations."
-    
-    # Escape braces for LangChain prompt safety
-    safe_web = str(web_results).replace("{", "{{").replace("}", "}}")
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "Internal Data: {db}\n\nWeb Research: {web}\n\nQuestion: {query}")
-    ])
-    
-    analysis_report = (prompt | llm).invoke({
-        "db": df.to_dict(orient='records'),
-        "web": safe_web,
-        "query": state["question"]
-    }).content
-
-    return {
-        "analysis_results": analysis_report,
-        "last_df_data": full_display_df.to_dict(orient='records'),
-        "next_step": "critic"
-    }
+    except Exception as e:
+        print(f"AICA: Analysis Agent Error: {e}")
+        return {
+            "analysis_results": f"Analysis interrupted: {str(e)}",
+            "next_step": "critic"
+        }

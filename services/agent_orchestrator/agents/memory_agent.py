@@ -1,102 +1,92 @@
 import uuid
 import json
-from services.mcp_host import call_cockroach_mcp
+import asyncio
 from services.agent_orchestrator.state import AnalystState
+from services.memory_service.vector_search import VectorMemory
+
+# Initialize the Vector Service
+# This handles model loading and CockroachDB vector formatting
+memory_service = VectorMemory()
 
 async def memory_agent(state: AnalystState):
     """
-    Manages Long-Term Memory (LTM) by interacting with CockroachDB.
-    Acts as the entry gateway and the final exit gate.
+    Manages Long-Term Memory (LTM) using Vector Similarity Search.
+    Professional Version: Handles high-quality report persistence and retrieval.
     """
     
-    # Identify if we are at the START or the END of the workflow
-    is_final_save = state.get("next_step") == "end"
+    user_id = state.get("user_id", "default")
+    # In LangGraph, we detect the 'end' signal to switch from 'Search' to 'Save'
+    is_final_save = str(state.get("next_step", "")).lower() == "end"
 
-    # --- ROLE 1: RETRIEVAL (Start of Graph) ---
+    # --- ROLE 1: SEMANTIC RETRIEVAL (Start of Graph) ---
     if not is_final_save:
-        print("🧠 Memory Agent: Fetching relevant Long-Term Memory...")
-        
+        print("Memory Agent: Performing Semantic Search in LTM...")
+        # Use 'question' as the primary search query
         question = state.get("question", "")
-        # Search for 'revenue' if present, otherwise broaden to 'insight'
-        search_term = "revenue" if "revenue" in question.lower() else "insight"
+        memory_list = []
         
         try:
-            # Search both key and value columns
-            query = f"""
-                SELECT memory_value 
-                FROM swarm_memory 
-                WHERE memory_value ILIKE '%{search_term}%' 
-                OR memory_key ILIKE '%{search_term}%' 
-                LIMIT 5
-            """
-            memories = await call_cockroach_mcp("execute_query", {"query": query})
+            # The vector service finds conceptually similar past insights
+            memories = memory_service.search(user_id, question, limit=5)
             
-            # Debugging line to see the JSON structure returned by MCP
-            print(f"DEBUG MCP: {memories}")
+            for row in memories:
+                # row structure: (memory_key, memory_value, similarity_score)
+                _, val, score, *rest = row
+                # We only include memories that are actually relevant (> 0.35 similarity)
 
-            memory_list = []
-            
-            # --- THE UNSTOPPABLE PARSER ---
-            if isinstance(memories, dict):
-                # 1. Try to get rows from the dict keys
-                rows = memories.get("rows") or memories.get("result") or []
-                
-                # 2. Fallback: If 'formatted_result' exists and rows is empty, parse the string
-                if not rows and memories.get("formatted_result"):
-                    try:
-                        rows = json.loads(memories["formatted_result"])
-                    except:
-                        pass
+                try:
+                    # Ensure score is a float for the comparison
+                    if isinstance(score, (int, float, str)):
+                        numeric_score = float(score) 
+                    else:
+                        continue
+        
+                    if numeric_score > 0.50:  # Lowered to 0.50 to catch that 60.2% match
+                        memory_list.append(val)
+                        jjj
+                except (ValueError, TypeError):
+                    print(f"DEBUG: Skipping row due to invalid score format: {score}")
 
-                # 3. Extract the memory_value from the identified rows
-                if isinstance(rows, list):
-                    for row in rows:
-                        if isinstance(row, dict) and "memory_value" in row:
-                            memory_list.append(row["memory_value"])
-                        elif isinstance(row, str):
-                            # In case it returns a list of raw strings
-                            memory_list.append(row)
-
-            # 4. Fallback for raw list response
-            elif isinstance(memories, list):
-                memory_list = [
-                    row.get("memory_value") if isinstance(row, dict) else str(row) 
-                    for row in memories
-                ]
-
-            if memory_list:
-                print(f"✅ Found {len(memory_list)} relevant past insights.")
-            else:
-                print(f"ℹ️ Query executed, but no memories matched '{search_term}' in the response structure.")
-
+            # We return the context to the planner so it can avoid repeating work
             return {
-                "memory_context": "\n".join(memory_list) if memory_list else "No previous memory found.",
+                "memory_context": memory_list if memory_list else ["No previous insights found."],
                 "next_step": "planner" 
             }
         except Exception as e:
-            print(f"⚠️ Memory Retrieval Failed: {e}")
-            return {"memory_context": "Error loading memory.", "next_step": "planner"}
-
-    # --- ROLE 2: CONSOLIDATION (End of Graph) ---
+            print(f"AICA: Vector Retrieval Failed: {e}")
+            return {"memory_context": [f"Memory error: {str(e)}"], "next_step": "planner"}
+    
+    # --- ROLE 2: SEMANTIC CONSOLIDATION (End of Graph) ---
     else:
-        print("🧠 Memory Agent: Consolidating new insights into LTM...")
+        # 1. Get the high-quality report (Checking both possible keys)
+        full_report = state.get("full_report_text") or state.get("analysis_results")
         
-        critique = state.get("critique", "")
-        final_answer = state.get("plan", []) 
+        # 2. Get the original question to use as the UNIQUE KEY
+        question = state.get("question", "").strip()
 
-        if critique or final_answer:
+        # DEBUG: Verify state content
+        print(f"DEBUG: Memory Agent State Check - Report length: {len(full_report) if full_report else 0}")
+
+        if full_report and question:
+            print(f"Memory Agent: Finalizing persistence for: '{question[:30]}...'")
             try:
-                mem_key = f"insight_{uuid.uuid4().hex[:8]}"
-                new_insight = f"User asked: {state.get('question')}. Result: {str(final_answer)[:200]}"
+                # --- FIX: Define the missing variables ---
+                mem_key = question
+                summary_insight = f"Analysis for: {question} | Summary: {full_report[:200].replace('\n', ' ')}..."
                 
-                insert_query = f"""
-                INSERT INTO swarm_memory (user_id, memory_key, memory_value, importance)
-                VALUES ('default', '{mem_key}', '{new_insight.replace("'", "''")}', 5)
-                """
+                # 3. Hand off to Vector Service
+                await memory_service.add_memory(
+                    user_id=user_id, 
+                    key=mem_key, 
+                    value=summary_insight,
+                    full_report_text=full_report
+                )
                 
-                await call_cockroach_mcp("execute_query", {"query": insert_query})
-                print(f"💾 Final state consolidated and saved with key: {mem_key}")
+                print(f"Professional Sync: Insight vectorized and saved with key: {mem_key[:20]}...")
             except Exception as e:
-                print(f"⚠️ Memory Consolidation Failed: {e}")
+                print(f"AICA: Memory Consolidation Failed: {e}")
+        else:
+            print("Memory Agent: No report found to save. Skipping consolidation.")
 
+        # 4. Signal LangGraph to reach the END node
         return {"next_step": "end"}
